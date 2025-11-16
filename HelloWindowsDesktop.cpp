@@ -1,5 +1,6 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <windowsx.h>
+#include <vector>
 
 // -------------------- Globals --------------------
 HINSTANCE g_hInst = nullptr;                    // App instance handling the window
@@ -17,9 +18,7 @@ int g_panStartMouseY = 0;
 int g_panStartOffsetX = 0;
 int g_panStartOffsetY = 0;
 
-// Zoom state
-double g_zoom = 1.0;
-
+// --------- Shape definition (stored in WORLD coordinates) ---------
 enum Tool
 {
     TOOL_LINE = 0,
@@ -34,7 +33,26 @@ Tool g_currentTool = TOOL_LINE;
 #define ID_TOOL_RECT    1002
 #define ID_TOOL_ELLIPSE 1003
 
-// Button handles (optional but handy)
+struct Shape
+{
+    Tool type;
+    double x1, y1; // world coords (start)
+    double x2, y2; // world coords (end)
+};
+
+std::vector<Shape> g_shapes;
+
+// Current drawing state (left mouse)
+bool g_isDrawing = false;
+double g_drawStartX = 0.0;
+double g_drawStartY = 0.0;
+double g_drawCurrentX = 0.0;
+double g_drawCurrentY = 0.0;
+
+// Zoom state
+double g_zoom = 1.0;
+
+// Button handles
 HWND g_hBtnLine = nullptr;
 HWND g_hBtnRect = nullptr;
 HWND g_hBtnEllipse = nullptr;
@@ -105,6 +123,22 @@ void UpdateWindowTitleWithTool(HWND hwnd)
     wchar_t title[256];
     wsprintf(title, L"Win32 + GDI - Toolbar Demo [Tool: %s]", toolName);
     SetWindowText(hwnd, title);
+}
+
+// ---------------------- Helper: convert world vs screen coordinates ------------------
+// Convert screen (client) coordinates → world coordinates
+void ScreenToWorld(int sx, int sy, double& wx, double& wy)
+{
+    // Remove pan and top margin, then divide by zoom
+    wx = (sx - g_panX) / g_zoom;
+    wy = (sy - topMargin - g_panY) / g_zoom;
+}
+
+// Convert world → screen
+void WorldToScreen(double wx, double wy, int& sx, int& sy)
+{
+    sx = (int)(wx * g_zoom) + g_panX;
+    sy = (int)(wy * g_zoom) + g_panY + topMargin;
 }
 
 // -------------------- WndProc --------------------
@@ -186,6 +220,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    case WM_LBUTTONDOWN:
+    {
+        int sx = GET_X_LPARAM(lParam);
+        int sy = GET_Y_LPARAM(lParam);
+
+        // Ignore clicks on toolbar area
+        if (sy < topMargin)
+            return 0;
+
+        // Start drawing a new shape
+        g_isDrawing = true;
+
+        ScreenToWorld(sx, sy, g_drawStartX, g_drawStartY);
+        g_drawCurrentX = g_drawStartX;
+        g_drawCurrentY = g_drawStartY;
+
+        SetCapture(hwnd); // capture mouse while drawing
+        return 0;
+    }
+
     case WM_RBUTTONDOWN:
     {
         // Start panning
@@ -201,6 +255,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    case WM_LBUTTONUP:
+    {
+        if (g_isDrawing)
+        {
+            int sx = GET_X_LPARAM(lParam);
+            int sy = GET_Y_LPARAM(lParam);
+
+            double wx, wy;
+            ScreenToWorld(sx, sy, wx, wy);
+            g_drawCurrentX = wx;
+            g_drawCurrentY = wy;
+
+            // Create final shape and store it
+            Shape s{};
+            s.type = g_currentTool;
+            s.x1   = g_drawStartX;
+            s.y1   = g_drawStartY;
+            s.x2   = g_drawCurrentX;
+            s.y2   = g_drawCurrentY;
+
+            g_shapes.push_back(s);
+
+            g_isDrawing = false;
+            ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+    }
+
     case WM_RBUTTONUP:
     {
         if (g_isPanning)
@@ -208,6 +291,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_isPanning = false;
             ReleaseCapture();
         }
+        return 0;
+    }
+
+    case WM_MOUSEMOVE:
+    {
+        int sx = GET_X_LPARAM(lParam);
+        int sy = GET_Y_LPARAM(lParam);
+
+        if (g_isPanning)
+        {
+            int dx = sx - g_panStartMouseX;
+            int dy = sy - g_panStartMouseY;
+
+            g_panX = g_panStartOffsetX + dx;
+            g_panY = g_panStartOffsetY + dy;
+
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        else if (g_isDrawing)
+        {
+            // Update current endpoint in world coords
+            double wx, wy;
+            ScreenToWorld(sx, sy, wx, wy);
+            g_drawCurrentX = wx;
+            g_drawCurrentY = wy;
+
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+
         return 0;
     }
 
@@ -249,25 +361,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_zoom = newZoom;
 
             UpdateWindowTitleWithTool(hwnd);
-            InvalidateRect(hwnd, nullptr, TRUE);
-        }
-        return 0;
-    }
-
-    case WM_MOUSEMOVE:
-    {
-        if (g_isPanning)
-        {
-            int mouseX = GET_X_LPARAM(lParam);
-            int mouseY = GET_Y_LPARAM(lParam);
-
-            int dx = mouseX - g_panStartMouseX;
-            int dy = mouseY - g_panStartMouseY;
-
-            // Update pan offsets
-            g_panX = g_panStartOffsetX + dx;
-            g_panY = g_panStartOffsetY + dy;
-
             InvalidateRect(hwnd, nullptr, TRUE);
         }
         return 0;
