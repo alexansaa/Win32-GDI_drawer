@@ -1,0 +1,105 @@
+############################
+# Visual Studio / Build
+############################
+
+# User-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# VS workspace
+.vs/
+*.VC.db
+*.VC.VC.opendb
+
+# Build results
+Debug/
+DebugPublic/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+x64/
+x86/
+ARM/
+ARM64/
+bin/
+Bin/
+Binaries/
+obj/
+ipch/
+out/
+build/
+[Bb]uild*/
+
+# CMake (if you add it later)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CMakeScripts/
+Testing/
+CTestTestfile.cmake
+Makefile
+CMakeUserPresets.json
+CMakeSettings.json
+compile_commands.json
+cmake-build-*/
+
+############################
+# Windows / OS junk
+############################
+
+# Windows image file caches
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+
+# Recycle Bin
+$RECYCLE.BIN/
+
+# Windows Installer files
+*.cab
+*.msi
+*.msm
+*.msp
+
+# Misc
+*.log
+
+############################
+# IDE / Tools
+############################
+
+# JetBrains Rider / ReSharper / CLion etc.
+.idea/
+*.sln.iml
+_ReSharper*/
+*_ReSharper.Caches/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+############################
+# Others
+############################
+
+# Backup / temp
+*~
+*.tmp
+*.bak
+*.old
+
+# Crash dumps
+*.dmp
+
+# NuGet / packages
+packages/
+*.nupkg
+*.snupkg
+project.lock.json
+artifacts/
+
+# Cache
+*.tlog
+*.lastbuildstate
