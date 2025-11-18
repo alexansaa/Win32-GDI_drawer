@@ -419,7 +419,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     // angle step
                     double dtheta = 2.0 * 3.1415 / g_polySides;
 
-                    g_polyBaseAngle = std::atan(dy - 1 / dx - 1);
+                    g_polyBaseAngle = std::atan2(dy, dx);
 
                     std::vector<POINT> regPolygonPreview;
 
@@ -776,7 +776,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                         std::ostringstream sso;
                         sso << "Index | Theta | wx | wy\n";
 
-                        g_polyBaseAngle = std::atan(dy / dx);
+                        g_polyBaseAngle = std::atan2(dy, dx);
 
                         for (int i = 0; i < g_polySides; ++i) {
                             double theta = g_polyBaseAngle + i * dtheta;
