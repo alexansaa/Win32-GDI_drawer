@@ -22,13 +22,18 @@ int g_panStartMouseY = 0;
 int g_panStartOffsetX = 0;
 int g_panStartOffsetY = 0;
 
+// snaping feature vars
+bool g_hasHoverSnap = false;
+POINT g_hoverSnapWorld{};
+
 // --------- Shape definition (stored in WORLD coordinates) ---------
 enum Tool
 {
     TOOL_LINE = 0,
     TOOL_RECT,
     TOOL_ELLIPSE,
-    TOOL_MULTILINE
+    TOOL_MULTILINE,
+    TOOL_POLIGON
 };
 
 Tool g_currentTool = TOOL_LINE;
@@ -38,6 +43,10 @@ Tool g_currentTool = TOOL_LINE;
 #define ID_TOOL_RECT    1002
 #define ID_TOOL_ELLIPSE 1003
 #define ID_TOOL_MULTILINE 1004
+#define ID_TOOL_POLIGON 1005
+
+// Input Labels IDs
+#define ID_EDIT_SIDES 2001
 
 std::vector<POINT> g_points;
 
@@ -53,6 +62,10 @@ std::vector<std::vector<POINT>> g_poligons;     // Poligons
 
 // Current drawing state (left mouse)
 bool g_isDrawing = false;
+POINT  g_polyCenterWorld{};
+POINT  g_polyEdgeWorld{};  // current mouse in world
+int    g_polySides = 5;    // example: pentagon
+double g_polyBaseAngle = 0.0; // orientation (radians)
 
 // Zoom state
 double g_zoom = 1.0;
@@ -62,12 +75,17 @@ HWND g_hBtnLine = nullptr;
 HWND g_hBtnRect = nullptr;
 HWND g_hBtnEllipse = nullptr;
 HWND g_hBtnMultiLine = nullptr;
+HWND g_hBtnPoligon = nullptr;
+
+// Input handles
+HWND g_hEditSides = nullptr;        // input for g_polySides
 
 // -------------------- Forward declarations --------------------
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 void printConsole(const std::ostringstream& oss);
 void printConsolePoints();
 bool getMouseWorldCoord(LPARAM lParam, POINT& out);
+bool FindSnapPoint(int mouseX, int mouseY, POINT& outWorld);
 
 // -------------------- WinMain --------------------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
@@ -135,6 +153,7 @@ void UpdateWindowTitleWithTool(HWND hwnd)
         case TOOL_RECT:    toolName = L"Rect";    break;
         case TOOL_ELLIPSE: toolName = L"Ellipse"; break;
         case TOOL_MULTILINE: toolName = L"Multi Line"; break;
+        case TOOL_POLIGON: toolName = L"Poligon"; break;
     }
 
     wchar_t title[256];
@@ -156,6 +175,51 @@ void WorldToScreen(double wx, double wy, int& sx, int& sy)
 {
     sx = (int)(wx * g_zoom) + g_panX;
     sy = (int)(wy * g_zoom) + g_panY + topMargin;
+}
+
+// ---------------------- Helper: snapping ----------------------
+const int SNAP_RADIUS_PIXELS = 10; // how close (in screen pixels) to snap
+
+bool FindSnapPoint(int mouseX, int mouseY, POINT& outWorld)
+{
+    bool found = false;
+    int bestDist2 = SNAP_RADIUS_PIXELS * SNAP_RADIUS_PIXELS;
+
+    auto consider = [&](const POINT& wpt)
+        {
+            int sx, sy;
+            WorldToScreen(wpt.x, wpt.y, sx, sy); // world -> screen
+            int dx = sx - mouseX;
+            int dy = sy - mouseY;
+            int d2 = dx * dx + dy * dy;
+
+            if (d2 <= bestDist2)
+            {
+                bestDist2 = d2;
+                outWorld = wpt;
+                found = true;
+            }
+        };
+
+    // 1) Endpoints of basic shapes
+    for (const Shape& s : g_shapes)
+    {
+        consider(s.p_init);
+        consider(s.p_end);
+    }
+
+    // 2) All vertices of stored polygons
+    for (const std::vector<POINT>& poly : g_poligons)
+    {
+        for (const POINT& p : poly)
+            consider(p);
+    }
+
+    // 3) Current in-progress poly points (so you can snap to what's being built)
+    for (const POINT& p : g_points)
+        consider(p);
+
+    return found;
 }
 
 // -------------------- WndProc --------------------
@@ -207,6 +271,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_hInst,
                 nullptr);
 
+            g_hBtnPoligon = CreateWindowEx(
+                0, L"BUTTON", L"Poligon",
+                WS_CHILD | WS_VISIBLE | BS_PUSHLIKE | BS_AUTORADIOBUTTON,
+                4 * btnWidth, y, btnWidth, btnHeight,
+                hwnd,
+                (HMENU)ID_TOOL_POLIGON,
+                g_hInst,
+                nullptr);
+
+            // Label "Sides"
+            CreateWindowEx(
+                0, L"STATIC", L"Sides:",
+                WS_CHILD | WS_VISIBLE,
+                5 * btnWidth + 10, 8,   // x, y
+                40, 20,                 // width, height
+                hwnd,
+                nullptr,
+                g_hInst,
+                nullptr);
+
+            // --- Numeric edit box ---
+            g_hEditSides = CreateWindowEx(
+                WS_EX_CLIENTEDGE,
+                L"EDIT",
+                L"5",   // initial text
+                WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL,
+                6 * btnWidth + 60, 5,   // x, y
+                40, 20,                 // width, height
+                hwnd,
+                (HMENU)ID_EDIT_SIDES,
+                g_hInst,
+                nullptr);
+
             // Set default checked button
             SendMessage(g_hBtnLine, BM_SETCHECK, BST_CHECKED, 0);
 
@@ -221,30 +318,65 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             if (wmEvent == BN_CLICKED)
             {
-                switch (wmId)
-                {
-                case ID_TOOL_LINE:
-                    g_currentTool = TOOL_LINE;
-                    UpdateWindowTitleWithTool(hwnd);
-                    InvalidateRect(hwnd, nullptr, TRUE);
-                    break;
+                switch (wmId) {
+                    case ID_TOOL_LINE:
+                        g_currentTool = TOOL_LINE;
+                        UpdateWindowTitleWithTool(hwnd);
+                        InvalidateRect(hwnd, nullptr, TRUE);
+                        break;
 
-                case ID_TOOL_RECT:
-                    g_currentTool = TOOL_RECT;
-                    UpdateWindowTitleWithTool(hwnd);
-                    InvalidateRect(hwnd, nullptr, TRUE);
-                    break;
+                    case ID_TOOL_RECT:
+                        g_currentTool = TOOL_RECT;
+                        UpdateWindowTitleWithTool(hwnd);
+                        InvalidateRect(hwnd, nullptr, TRUE);
+                        break;
 
-                case ID_TOOL_ELLIPSE:
-                    g_currentTool = TOOL_ELLIPSE;
-                    UpdateWindowTitleWithTool(hwnd);
-                    InvalidateRect(hwnd, nullptr, TRUE);
-                    break;
-                case ID_TOOL_MULTILINE:
-                    g_currentTool = TOOL_MULTILINE;
-                    UpdateWindowTitleWithTool(hwnd);
-                    InvalidateRect(hwnd, nullptr, TRUE);
-                    break;
+                    case ID_TOOL_ELLIPSE:
+                        g_currentTool = TOOL_ELLIPSE;
+                        UpdateWindowTitleWithTool(hwnd);
+                        InvalidateRect(hwnd, nullptr, TRUE);
+                        break;
+                    case ID_TOOL_MULTILINE:
+                        g_currentTool = TOOL_MULTILINE;
+                        UpdateWindowTitleWithTool(hwnd);
+                        InvalidateRect(hwnd, nullptr, TRUE);
+                        break;
+                    case ID_TOOL_POLIGON:
+                        g_currentTool = TOOL_POLIGON;
+                        UpdateWindowTitleWithTool(hwnd);
+                        InvalidateRect(hwnd, nullptr, TRUE);
+                        break;
+
+                }
+                SetFocus(hwnd);
+            }
+
+            if (wmEvent == EN_CHANGE) {
+                switch (wmId) {
+                    case ID_EDIT_SIDES: {
+                        wchar_t buf[16];
+                        GetWindowText(g_hEditSides, buf, 16);
+
+                        if (buf[0] == L'\0')
+                        {
+                            // Don't touch g_polySides yet.
+                            return 0;
+                        }
+
+                        int value = _wtoi(buf);
+
+                        // clamp to a sensible range (at least triangle)
+                        if (value < 3)  value = 3;
+                        if (value > 64) value = 64;
+
+                        g_polySides = value;
+
+                        //// rewrite clamped value back into the box
+                        //swprintf_s(buf, L"%d", g_polySides);
+                        //SetWindowText(g_hEditSides, buf);
+
+                        return 0;
+                    }
                 }
             }
 
@@ -264,6 +396,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 // End drawing a new shape
                 //ReleaseCapture();                     // Release mouse capture
                 g_isDrawing = false;
+                g_hasHoverSnap = false;
 
                 if (g_points.size() == 0)
                     return 0;
@@ -275,6 +408,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
                 if (g_currentTool == TOOL_MULTILINE) {
                     g_poligons.push_back(g_points);
+                }
+
+                if (g_currentTool == TOOL_POLIGON) {
+                    // Create poligon setpoint
+                    double dx = g_points[1].x - g_points[0].x;
+                    double dy = g_points[1].y - g_points[0].y;
+                    double r = std::sqrt(dx * dx + dy * dy);
+
+                    // angle step
+                    double dtheta = 2.0 * 3.1415 / g_polySides;
+
+                    g_polyBaseAngle = std::atan(dy - 1 / dx - 1);
+
+                    std::vector<POINT> regPolygonPreview;
+
+                    for (int i = 0; i < g_polySides; ++i) {
+                        double theta = g_polyBaseAngle + i * dtheta;
+                        double wx = g_points[0].x + r * std::cos(theta);
+                        double wy = g_points[0].y + r * std::sin(theta);
+
+                        POINT w{};
+                        w.x = (LONG)wx;
+                        w.y = (LONG)wy;
+                        regPolygonPreview.push_back(w);
+                    }
+
+                    regPolygonPreview.push_back(regPolygonPreview.front());
+
+                    g_poligons.push_back(regPolygonPreview);
                 }
                 else {
                     Shape s{};
@@ -293,15 +455,68 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_LBUTTONDOWN:
         {
             if (g_isDrawing) {
-                std::ostringstream oss;
-
                 POINT tmp_pnt;
                 if (!getMouseWorldCoord(lParam, tmp_pnt)) {
                     return 0;
                 }
 
+                // Screen coords (for snapping distance)
+                int sx = GET_X_LPARAM(lParam);
+                int sy = GET_Y_LPARAM(lParam);
+
+                // Try snapping to existing points
+                POINT snappedWorld;
+                if (FindSnapPoint(sx, sy, snappedWorld))
+                {
+                    tmp_pnt = snappedWorld;
+                    /*std::ostringstream oss;
+                    oss << "Snapped to existing point: x=" << tmp_pnt.x << ", y=" << tmp_pnt.y << "\n";
+                    printConsole(oss);*/
+                }
+
                 if (g_currentTool == TOOL_MULTILINE) {
-                    g_points.push_back(tmp_pnt);
+                    // 1) Check if we clicked on an existing vertex in the current preview poly
+                    int snappedIndex = -1;
+                    for (int i = 0; i < (int)g_points.size(); ++i) {
+                        if (g_points[i].x == tmp_pnt.x && g_points[i].y == tmp_pnt.y) {
+                            snappedIndex = i;
+                            break;
+                        }
+                    }
+
+                    if (snappedIndex != -1 && g_points.size() >= 2) {
+                        // 2) User snapped to a preview vertex -> close polygon
+
+                        std::vector<POINT> poly;
+
+                        // keep points from snappedIndex to end of vector
+                        for (int i = snappedIndex; i < (int)g_points.size(); ++i) {
+                            poly.push_back(g_points[i]);
+                        }
+
+                        // Close polygon by repeating first point at the end if needed
+                        if (!poly.empty()) {
+                            POINT first = poly.front();
+                            POINT last = poly.back();
+                            if (first.x != last.x || first.y != last.y) {
+                                poly.push_back(first);
+                            }
+                        }
+
+                        g_poligons.push_back(poly);
+
+                        // reset drawing state
+                        g_points.clear();
+                        g_isDrawing = false;
+                        g_hasHoverSnap = false;
+
+                        InvalidateRect(hwnd, nullptr, TRUE);
+                        return 0;
+                    }
+                    else {
+                        // 3) Normal behavior: extend current poly
+                        g_points.push_back(tmp_pnt);
+                    }
                 }
                 else {
                     if (g_points.size() <= 1) {
@@ -312,6 +527,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                         g_points[1] = tmp_pnt;
                     }
                 }
+
                 printConsolePoints();
                 InvalidateRect(hwnd, nullptr, TRUE);
             }
@@ -353,11 +569,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case WM_MOUSEMOVE:
         {
+            int sx = GET_X_LPARAM(lParam);
+            int sy = GET_Y_LPARAM(lParam);
+
             if (g_isPanning)
             {
-                int sx = GET_X_LPARAM(lParam);
-                int sy = GET_Y_LPARAM(lParam);
-
                 int dx = sx - g_panStartMouseX;
                 int dy = sy - g_panStartMouseY;
 
@@ -365,6 +581,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_panY = g_panStartOffsetY + dy;
 
                 InvalidateRect(hwnd, nullptr, TRUE);
+                return 0;
+            }
+
+            // Hover snap
+            if (g_isDrawing)
+            {
+                POINT snapWorld;
+                if (FindSnapPoint(sx, sy, snapWorld))
+                {
+                    g_hasHoverSnap = true;
+                    g_hoverSnapWorld = snapWorld;
+                }
+                else
+                {
+                    g_hasHoverSnap = false;
+                }
+
+                InvalidateRect(hwnd, nullptr, TRUE); // redraw to show/hide circle
             }
 
             return 0;
@@ -468,6 +702,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 Polygon(hdc, polyScreen.data(), static_cast<int>(polyScreen.size()));
             }
 
+            // ---- Draw hover snap indicator ----
+            if (g_hasHoverSnap)
+            {
+                int sx, sy;
+                WorldToScreen(g_hoverSnapWorld.x, g_hoverSnapWorld.y, sx, sy);
+
+                int r = 6; // radius of the little circle
+
+                HPEN snapPen = CreatePen(PS_SOLID, 1, RGB(160, 160, 160)); // gray
+                HBRUSH snapBrush = (HBRUSH)GetStockObject(HOLLOW_BRUSH);
+
+                // Save current pen/brush from "shapes" drawing
+                HPEN prevPen = (HPEN)SelectObject(hdc, snapPen);
+                HBRUSH prevBrush = (HBRUSH)SelectObject(hdc, snapBrush);
+
+                Ellipse(hdc, sx - r, sy - r, sx + r, sy + r);
+
+                // Restore previous pen/brush
+                SelectObject(hdc, prevPen);
+                SelectObject(hdc, prevBrush);
+                DeleteObject(snapPen);
+            }
+
             // ---- Draw current in-progress shape (preview) ----
             if (g_isDrawing && g_points.size() > 1)
             {
@@ -475,36 +732,90 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 WorldToScreen(g_points[0].x, g_points[0].y, sx1, sy1);
                 WorldToScreen(g_points[1].x, g_points[1].y, sx2, sy2);
 
-                switch (g_currentTool)
-                {
-                case TOOL_LINE:
-                    MoveToEx(hdc, sx1, sy1, nullptr);
-                    LineTo(hdc, sx2, sy2);
-                    break;
+                switch (g_currentTool) {
+                    case TOOL_LINE:
+                        MoveToEx(hdc, sx1, sy1, nullptr);
+                        LineTo(hdc, sx2, sy2);
+                        break;
 
-                case TOOL_RECT:
-                    Rectangle(hdc, sx1, sy1, sx2, sy2);
-                    break;
+                    case TOOL_RECT:
+                        Rectangle(hdc, sx1, sy1, sx2, sy2);
+                        break;
 
-                case TOOL_ELLIPSE:
-                    Ellipse(hdc, sx1, sy1, sx2, sy2);
-                    break;
-                case TOOL_MULTILINE:
-                    std::vector<POINT> polyScreen;
-                    polyScreen.resize(g_points.size());
+                    case TOOL_ELLIPSE:
+                        Ellipse(hdc, sx1, sy1, sx2, sy2);
+                        break;
 
-                    for (size_t i = 0; i < g_points.size(); ++i)
-                    {
-                        int sx, sy;
-                        WorldToScreen(g_points[i].x, g_points[i].y, sx, sy);
-                        polyScreen[i].x = sx;
-                        polyScreen[i].y = sy;
+                    case TOOL_MULTILINE: {
+                        std::vector<POINT> multiLine;
+                        multiLine.resize(g_points.size());
+
+                        for (size_t i = 0; i < g_points.size(); ++i)
+                        {
+                            int sx, sy;
+                            WorldToScreen(g_points[i].x, g_points[i].y, sx, sy);
+                            multiLine[i].x = sx;
+                            multiLine[i].y = sy;
+                        }
+
+                        Polygon(hdc, multiLine.data(), static_cast<int>(multiLine.size()));
+                        break;
                     }
+                    case TOOL_POLIGON: {
+                        // Create poligon setpoint
+                        double dx = g_points[1].x - g_points[0].x;
+                        double dy = g_points[1].y - g_points[0].y;
+                        double r = std::sqrt(dx * dx + dy * dy);
 
-                    Polygon(hdc, polyScreen.data(), static_cast<int>(polyScreen.size()));
-                    break;
+                        // angle step
+                        double dtheta = 2.0 * 3.1415 / g_polySides;
+
+                        std::vector<POINT> regPolygonPreview;
+                        //regPolygonPreview.reserve(g_polySides + 1);
+
+                        std::ostringstream sso;
+                        sso << "Index | Theta | wx | wy\n";
+
+                        g_polyBaseAngle = std::atan(dy / dx);
+
+                        for (int i = 0; i < g_polySides; ++i) {
+                            double theta = g_polyBaseAngle + i * dtheta;
+                            double wx = g_points[0].x + r * std::cos(theta);
+                            double wy = g_points[0].y + r * std::sin(theta);
+
+                            sso << i << " | " << theta << " | " << wx << " | " << wy << "\n";
+                            
+                            POINT w{};
+                            w.x = (LONG)wx;
+                            w.y = (LONG)wy;
+                            regPolygonPreview.push_back(w);
+                        }
+
+                        printConsole(sso);
+
+                        regPolygonPreview.push_back(regPolygonPreview.front());
+
+                        for (size_t i = 0; i < regPolygonPreview.size(); ++i)
+                        {
+                            int sx, sy;
+                            WorldToScreen(regPolygonPreview[i].x, regPolygonPreview[i].y, sx, sy);
+                            regPolygonPreview[i].x = sx;
+                            regPolygonPreview[i].y = sy;
+                        }
+
+                        // create circle pointset
+                        int left, top, right, botton;
+                        WorldToScreen(g_points[0].x + r * -1.0, g_points[0].y + r * 1.0, left, top);
+                        WorldToScreen(g_points[0].x + r * 1.0, g_points[0].y + r * -1.0, right, botton);
+
+                        // Draw pilogon and cicle
+                        Ellipse(hdc, left, top, right, botton);
+                        Polygon(hdc, regPolygonPreview.data(), static_cast<int>(regPolygonPreview.size()));
+                        break;
+                    }
                 }
             }
+
 
             SelectObject(hdc, oldPen);
             SelectObject(hdc, oldBr);
